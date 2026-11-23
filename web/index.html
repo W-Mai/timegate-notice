@@ -1,0 +1,41 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>时光之门</title>
+  <link rel="stylesheet" href="/style.css">
+  <script src="/app.js" defer></script>
+</head>
+<body>
+  <main>
+    <header><h1>时光之门</h1></header>
+    <figure class="gate" aria-label="时光之门五屏预览">
+      <div class="housing">
+        <div class="vents" aria-hidden="true"></div>
+        <div class="screens" aria-hidden="true">
+          <div class="bezel"><div class="lcd lcd-1"></div></div>
+          <div class="bezel"><div class="lcd lcd-2"></div></div>
+          <div class="bezel"><div class="lcd lcd-3"></div></div>
+          <div class="bezel"><div class="lcd lcd-4"></div></div>
+          <div class="bezel"><div class="lcd lcd-5"></div></div>
+        </div>
+        <div class="base" aria-hidden="true"><i></i><i></i><i></i></div>
+      </div>
+      <div class="foot" aria-hidden="true"></div>
+    </figure>
+    <form>
+      <label for="message">显示文字</label>
+      <div class="controls">
+        <input id="message" type="text" placeholder="写点什么…" maxlength="48" autocomplete="off" required>
+        <label class="paint" title="氛围灯颜色">
+          <span class="sr-only">氛围灯颜色</span>
+          <input id="color" type="color" value="#5ce7c5">
+        </label>
+        <button type="submit">发送</button>
+      </div>
+      <p class="status" aria-live="polite"></p>
+    </form>
+  </main>
+</body>
+</html>
