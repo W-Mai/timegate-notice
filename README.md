@@ -1,35 +1,20 @@
-# 时光之门文字服务
+# TimeGate Notice
 
-通过浏览器给 Divoom Times Gate II 的五块屏发送闪烁的文字和表情包。预览和 GIF 共用排版，每个字符完整显示在一块 LCD 上。最右屏右下角显示发送时间，格式为上海时区 `HH:mm`。设备拉取五份动画后显示最多 30 分钟。点击「标为已读」可提前恢复通知前的整机表盘或独立屏组。可设置氛围灯颜色，灯效峰值设置为 100。
+在 Divoom Times Gate II 的五块屏幕上播放文字和表情包的局域网服务。
 
-通过「＋ 表情包」选择 GIF、PNG、JPEG 或 WebP，文件最大 4 MB。文字和表情可以一起发送，也可以单独发送。表情占一块屏，保持原图比例。动图播放前 8 秒并循环，原始帧率过高时会降低帧率。
+## 功能
 
-## 自动化接口
+- 实时预览。文字按完整字符排版，表情单独占一块屏，支持 GIF、PNG、JPEG 和 WebP。
+- 文字闪烁、表情循环播放。第五屏右下角显示发送时间，设备氛围灯使用选定颜色。
+- 通知最多显示 30 分钟。点击「标为已读」即可提前恢复原表盘或屏组，页面显示处理状态。
+- 桌面自动化可用 HTTP API 发送通知、上传表情、查询状态和恢复画面。
 
-启用 `GATE_API_KEY` 后，桌面自动化可以在 URL 末尾添加 `?key=<自动化 Key>`，直接调用下表接口。控制页继续使用会话和同源 `Origin`。
+## 架构
 
-| 方法与路径 | 请求体 |
-| --- | --- |
-| `POST /api/send` | JSON，例如 `{"text":"会议开始了","color":"#5ce7c5"}` |
-| `POST /api/sticker` | 表情包文件内容。返回的 `id` 可作为发送 JSON 中的 `sticker` |
-| `POST /api/restore` | 空请求体恢复当前通知，也可用 JSON `{"id":"…"}` 指定通知 |
-| `GET /api/status` | 空请求体 |
+![TimeGate Notice 架构](docs/architecture.svg)
 
-发送和恢复返回 `202` 后可查询状态。手动恢复成功时 `phase` 为 `read`，自然到期恢复时为 `restored`。
+浏览器和桌面自动化访问同一个 Python HTTP 服务。Pillow 将内容生成五份 128×128 GIF，设备通过局域网拉取并播放。服务保存原显示布局和恢复时间，定时或按已读请求恢复画面。
 
-## 运行
+## 使用
 
-需要 Python 3、Pillow、fontTools 和支持中文的 TrueType 字体。入口为 `python3 service.py`。要持续后台运行，可将 `deployment/timegate-notice.service` 安装为用户级 systemd 服务。把应用文件放到 `~/.local/share/timegate-notice/current`，配置放到 `~/.config/timegate-notice/service.env`，然后运行 `systemctl --user daemon-reload` 和 `systemctl --user enable --now timegate-notice.service`。
-
-| 环境变量 | 用途 |
-| --- | --- |
-| `GATE_ORIGIN` | 浏览器入口，如 `http://host:19001` |
-| `GATE_PORT`、`GATE_LISTEN` | TCP 端口和本机监听地址，默认为 `19001` 和 `127.0.0.1` |
-| `GATE_ASSET_ORIGIN` | 设备可访问的同一服务地址，默认和浏览器入口相同 |
-| `GATE_ACCESS_KEY` | 32 至 128 位十六进制访问码，打开 `/open/<访问码>` 进入页面 |
-| `GATE_API_KEY` | 可选的独立自动化 Key，32 至 128 位十六进制字符 |
-| `GATE_ENDPOINT`、`GATE_TOKEN` | 设备的 `/divoom_api` URL 和本地令牌 |
-| `GATE_FONT`、`GATE_FONT_INDEX` | 字体文件和 TTC 字体索引，索引默认 `2` 对应 Noto CJK 简体中文 |
-| `GATE_JOURNAL` | 恢复记录的文件路径，应放在服务用户可写的持久目录 |
-
-灯光采用设备原生单色呼吸档位，公开接口未提供周期字段。恢复对应 Divoom 记录的整机表盘或屏组，临时推送内容没有可读取的原始素材。服务需访问 Divoom 通道信息接口才能保存恢复信息。
+在配置设备地址和字体后运行 `python3 service.py`。安装、用户级 systemd 配置和 API 示例见[部署与接口](docs/deployment.md)。
