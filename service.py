@@ -8,6 +8,7 @@ import secrets
 import threading
 import time
 import urllib.request
+from collections import OrderedDict
 from dataclasses import dataclass, field
 from http import HTTPStatus
 from http.cookies import SimpleCookie
@@ -15,12 +16,13 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
 
-from render import Renderer, TextError, normalize_text
+from render import MAX_STICKER_BYTES, Renderer, StickerError, TextError, normalize_text, sticker_gif
 
 
 DISPLAY_SECONDS = 30
 ASSET_TIMEOUT = 12
 RESTORE_RETRY_SECONDS = 5
+MAX_STORED_STICKERS = 12
 CHANNEL_INFO_URL = "https://app.divoom-gz.com/Channel/Get5LcdInfoV2"
 ROOT = Path(__file__).resolve().parent
 HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
@@ -207,7 +209,24 @@ class Server(ThreadingHTTPServer):
         self.notices = notices
         self.access_key = access_key
         self.origin = origin
+        self.stickers = OrderedDict()
+        self.sticker_lock = threading.Lock()
         super().__init__(address, Handler)
+
+    def store_sticker(self, gif):
+        key = secrets.token_hex(16)
+        with self.sticker_lock:
+            self.stickers[key] = gif
+            if len(self.stickers) > MAX_STORED_STICKERS:
+                self.stickers.popitem(last=False)
+        return key
+
+    def get_sticker(self, key):
+        with self.sticker_lock:
+            gif = self.stickers.get(key)
+            if gif is not None:
+                self.stickers.move_to_end(key)
+            return gif
 
 
 class Handler(BaseHTTPRequestHandler):
@@ -275,7 +294,7 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(404)
 
     def do_POST(self):
-        if self.path not in ("/api/preview", "/api/send"):
+        if self.path not in ("/api/preview", "/api/send", "/api/sticker"):
             self.reply(404)
             return
         if not self.authenticated():
@@ -284,6 +303,9 @@ class Handler(BaseHTTPRequestHandler):
         if self.headers.get("Origin") != self.server.origin:
             self.json_reply(403, {"error": "请求来源不匹配"})
             return
+        if self.path == "/api/sticker":
+            self.upload_sticker()
+            return
         try:
             length = int(self.headers.get("Content-Length", "0"))
             if not 0 < length <= 2048:
@@ -291,12 +313,22 @@ class Handler(BaseHTTPRequestHandler):
             payload = json.loads(self.rfile.read(length))
             if not isinstance(payload, dict):
                 raise ValueError
-            text = normalize_text(payload.get("text"))
+            text = normalize_text(payload.get("text", ""))
             color = payload.get("color")
             if not isinstance(color, str) or not re.fullmatch(r"#[a-fA-F0-9]{6}", color):
                 raise ValueError
-            preview, gifs = self.server.renderer.render(text)
-        except TextError as error:
+            key = payload.get("sticker")
+            sticker = None
+            if key is not None:
+                if not isinstance(key, str) or not re.fullmatch(r"[a-f0-9]{32}", key):
+                    raise StickerError("请重新选择表情包")
+                sticker = self.server.get_sticker(key)
+                if sticker is None:
+                    raise StickerError("表情包已过期，请重新选择")
+            if not text and sticker is None:
+                raise TextError("请输入文字或选择表情包")
+            preview, gifs, panel = self.server.renderer.render(text, with_sticker=sticker is not None)
+        except (StickerError, TextError) as error:
             self.json_reply(400, {"error": str(error)})
             return
         except (UnicodeError, ValueError):
@@ -304,11 +336,31 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/preview":
             encoded = base64.b64encode(preview).decode()
-            self.json_reply(200, {"image": f"data:image/png;base64,{encoded}"})
-        elif self.server.notices.start(color, gifs):
+            self.json_reply(200, {"image": f"data:image/png;base64,{encoded}", "stickerPanel": panel})
+            return
+        if sticker is not None:
+            gifs = gifs[:panel] + (sticker,) + gifs[panel + 1:]
+        if self.server.notices.start(color, gifs):
             self.json_reply(HTTPStatus.ACCEPTED, {"phase": "preparing"})
         else:
-            self.json_reply(HTTPStatus.CONFLICT, {"error": "上一条文字尚未结束"})
+            self.json_reply(HTTPStatus.CONFLICT, {"error": "上一条内容尚未结束"})
+
+    def upload_sticker(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if length > MAX_STICKER_BYTES:
+                self.json_reply(HTTPStatus.REQUEST_ENTITY_TOO_LARGE, {"error": "表情包最大 4 MB"})
+                return
+            if length <= 0:
+                raise StickerError("请选择表情包文件")
+            gif = sticker_gif(self.rfile.read(length))
+        except ValueError as error:
+            message = str(error) if isinstance(error, StickerError) else "表情包格式无效"
+            self.json_reply(400, {"error": message})
+            return
+        key = self.server.store_sticker(gif)
+        encoded = base64.b64encode(gif).decode()
+        self.json_reply(201, {"id": key, "image": f"data:image/gif;base64,{encoded}"})
 
 
 def main():
