@@ -107,6 +107,8 @@ class Notices:
             self.state = {"phase": "recovering", "id": self.pending.get("id"),
                           "sentTime": self.pending.get("sentTime"), "readRequested": self.pending.get("read", False),
                           "deadline": self.pending["deadline"]}
+            if self.state["id"] and not self.state["readRequested"] and self.state["deadline"] > time.time():
+                self.state.update(phase="playing", fetched=5)
             threading.Thread(target=self.finish, args=("restored",), daemon=True).start()
 
     def persist(self, pending):
@@ -236,11 +238,12 @@ class Notices:
 
 
 class Server(ThreadingHTTPServer):
-    def __init__(self, address, renderer, notices, access_key, origin):
+    def __init__(self, address, renderer, notices, access_key, origin, api_key=None):
         self.renderer = renderer
         self.notices = notices
         self.access_key = access_key
         self.origin = origin
+        self.api_key = api_key
         self.stickers = OrderedDict()
         self.sticker_lock = threading.Lock()
         super().__init__(address, Handler)
@@ -274,6 +277,10 @@ class Handler(BaseHTTPRequestHandler):
         session = cookie.get("gate_session")
         return bool(session and hmac.compare_digest(session.value.encode(), self.server.access_key.encode()))
 
+    def automation_authenticated(self, query):
+        key = self.server.api_key
+        return bool(key and hmac.compare_digest(query.encode(), f"key={key}".encode()))
+
     def reply(self, status, body=b"", content_type="text/plain", headers=None):
         self.send_response(status)
         self.send_header("Content-Type", content_type)
@@ -292,6 +299,14 @@ class Handler(BaseHTTPRequestHandler):
         self.reply(status, json.dumps(data, ensure_ascii=False).encode(), "application/json; charset=utf-8")
 
     def do_GET(self):
+        path, separator, query = self.path.partition("?")
+        if path == "/api/status":
+            authorized = self.automation_authenticated(query) if separator else self.authenticated()
+            if authorized:
+                self.json_reply(200, self.server.notices.status())
+            else:
+                self.json_reply(401, {"error": "需要有效的会话或 API Key"})
+            return
         if self.path == "/healthz":
             self.json_reply(200, {"ok": True})
             return
@@ -312,9 +327,6 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authenticated():
             self.reply(401, "请使用专用访问链接打开时光之门。".encode(), "text/plain; charset=utf-8")
             return
-        if self.path == "/api/status":
-            self.json_reply(200, self.server.notices.status())
-            return
         if self.path == "/favicon.ico":
             self.reply(204)
             return
@@ -326,19 +338,22 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(404)
 
     def do_POST(self):
-        if self.path not in ("/api/preview", "/api/send", "/api/sticker", "/api/restore"):
+        path, separator, query = self.path.partition("?")
+        if path not in ("/api/preview", "/api/send", "/api/sticker", "/api/restore"):
             self.reply(404)
             return
-        if not self.authenticated():
-            self.json_reply(401, {"error": "请重新用访问链接打开页面"})
+        authorized = (path != "/api/preview" and self.automation_authenticated(query)) if separator else self.authenticated()
+        if not authorized:
+            self.json_reply(401, {"error": "需要有效的会话或 API Key"})
             return
-        if self.headers.get("Origin") != self.server.origin:
+        origin = self.headers.get("Origin")
+        if origin != self.server.origin and not (separator and origin is None):
             self.json_reply(403, {"error": "请求来源不匹配"})
             return
-        if self.path == "/api/sticker":
+        if path == "/api/sticker":
             self.upload_sticker()
             return
-        if self.path == "/api/restore":
+        if path == "/api/restore":
             self.restore_notice()
             return
         try:
@@ -369,7 +384,7 @@ class Handler(BaseHTTPRequestHandler):
         except (UnicodeError, ValueError):
             self.json_reply(400, {"error": "文字或颜色格式无效"})
             return
-        if self.path == "/api/preview":
+        if path == "/api/preview":
             encoded = base64.b64encode(preview).decode()
             self.json_reply(200, {"image": f"data:image/png;base64,{encoded}", "stickerPanel": panel})
             return
@@ -432,12 +447,15 @@ def main():
     origin = os.environ["GATE_ORIGIN"].rstrip("/")
     assets_origin = os.environ.get("GATE_ASSET_ORIGIN", origin)
     access_key = os.environ["GATE_ACCESS_KEY"]
+    api_key = os.environ.get("GATE_API_KEY")
     if not re.fullmatch(r"[a-f0-9]{32,128}", access_key) or not urlsplit(origin).netloc:
         raise SystemExit("Invalid control origin or access key")
+    if api_key is not None and not re.fullmatch(r"[a-f0-9]{32,128}", api_key):
+        raise SystemExit("Invalid automation API key")
     gate = Gate(os.environ["GATE_ENDPOINT"], int(os.environ["GATE_TOKEN"]))
     renderer = Renderer(os.environ["GATE_FONT"], int(os.environ.get("GATE_FONT_INDEX", "2")))
     notices = Notices(gate, assets_origin, Path(os.environ["GATE_JOURNAL"]))
-    with Server((os.environ.get("GATE_LISTEN", "127.0.0.1"), port), renderer, notices, access_key, origin) as server:
+    with Server((os.environ.get("GATE_LISTEN", "127.0.0.1"), port), renderer, notices, access_key, origin, api_key) as server:
         logging.info("Listening on port %d", port)
         server.serve_forever()
 

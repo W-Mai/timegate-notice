@@ -4,9 +4,18 @@
 
 通过「＋ 表情包」选择 GIF、PNG、JPEG 或 WebP，文件最大 4 MB。文字和表情可以一起发送，也可以单独发送。表情占一块屏，保持原图比例。动图播放前 8 秒并循环，原始帧率过高时会降低帧率。
 
-## 提前恢复接口
+## 自动化接口
 
-`POST /api/restore` 需要控制页会话和同源 `Origin`。可以发送 `POST /api/send` 返回的 `{"id":"…"}` 来恢复指定通知。空请求体会恢复当前通知。接口返回 `202` 后可通过 `GET /api/status` 查询。手动恢复成功时 `phase` 为 `read`，自然到期恢复时为 `restored`。
+启用 `GATE_API_KEY` 后，桌面自动化可以在 URL 末尾添加 `?key=<自动化 Key>`，直接调用下表接口。控制页继续使用会话和同源 `Origin`。
+
+| 方法与路径 | 请求体 |
+| --- | --- |
+| `POST /api/send` | JSON，例如 `{"text":"会议开始了","color":"#5ce7c5"}` |
+| `POST /api/sticker` | 表情包文件内容。返回的 `id` 可作为发送 JSON 中的 `sticker` |
+| `POST /api/restore` | 空请求体恢复当前通知，也可用 JSON `{"id":"…"}` 指定通知 |
+| `GET /api/status` | 空请求体 |
+
+发送和恢复返回 `202` 后可查询状态。手动恢复成功时 `phase` 为 `read`，自然到期恢复时为 `restored`。
 
 ## 运行
 
@@ -18,6 +27,7 @@
 | `GATE_PORT`、`GATE_LISTEN` | TCP 端口和本机监听地址，默认为 `19001` 和 `127.0.0.1` |
 | `GATE_ASSET_ORIGIN` | 设备可访问的同一服务地址，默认和浏览器入口相同 |
 | `GATE_ACCESS_KEY` | 32 至 128 位十六进制访问码，打开 `/open/<访问码>` 进入页面 |
+| `GATE_API_KEY` | 可选的独立自动化 Key，32 至 128 位十六进制字符 |
 | `GATE_ENDPOINT`、`GATE_TOKEN` | 设备的 `/divoom_api` URL 和本地令牌 |
 | `GATE_FONT`、`GATE_FONT_INDEX` | 字体文件和 TTC 字体索引，索引默认 `2` 对应 Noto CJK 简体中文 |
 | `GATE_JOURNAL` | 恢复记录的文件路径，应放在服务用户可写的持久目录 |
