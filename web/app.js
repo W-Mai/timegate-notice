@@ -9,6 +9,8 @@ const stickerFile = document.querySelector("#sticker-file");
 const chooseSticker = document.querySelector("#choose-sticker");
 const removeSticker = document.querySelector("#remove-sticker");
 const stickerName = document.querySelector("#sticker-name");
+const sentTime = document.querySelector("#sent-time");
+const markRead = document.querySelector("#mark-read");
 const stickerImage = document.createElement("img");
 stickerImage.alt = "";
 
@@ -20,6 +22,9 @@ let previewError = "";
 let sending = false;
 let uploading = false;
 let sticker = null;
+let noticeId;
+let canRestore = false;
+let restoring = false;
 const phases = {
   idle: "",
   preparing: "正在保存当前屏幕…",
@@ -27,7 +32,8 @@ const phases = {
   recovering: "正在等待恢复原屏幕…",
   restoring: "正在恢复原屏幕…",
   "restore-retry": "设备暂未完成恢复，正在重试…",
-  restored: "30 秒已结束，设备已接受恢复指令。",
+  restored: "已到期 · 设备已接受恢复指令",
+  read: "已读",
   "send-error": "动画发送失败，设备已接受恢复指令。",
   "light-error": "灯光设置失败，设备已接受屏幕恢复指令。",
   "layout-error": "无法读取当前屏幕布局，发送已取消。",
@@ -41,6 +47,8 @@ function displayStatus(message, error = false) {
 
 function updateButton() {
   button.disabled = !valid || active || sending || uploading;
+  markRead.hidden = !canRestore && !restoring;
+  markRead.disabled = restoring;
 }
 
 function payload() {
@@ -147,26 +155,34 @@ removeSticker.addEventListener("click", () => {
   preview();
 });
 
+function applyStatus(snapshot) {
+  active = busyPhases.has(snapshot.phase);
+  noticeId = snapshot.id;
+  canRestore = active && !snapshot.readRequested && !["restoring", "restore-retry"].includes(snapshot.phase);
+  const playing = snapshot.phase === "playing";
+  gate.classList.toggle("is-playing", playing);
+  sentTime.textContent = snapshot.sentTime || "";
+  sentTime.hidden = !active || !snapshot.sentTime;
+  updateButton();
+  if (playing) {
+    const remaining = Math.max(0, Math.ceil(snapshot.deadline - Date.now() / 1000));
+    const duration = `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, "0")}`;
+    const warning = snapshot.lightError ? "灯光设置失败。" : "";
+    displayStatus(`${warning}显示中 · ${duration} 后恢复`, snapshot.lightError);
+  } else if (snapshot.phase === "downloading") {
+    displayStatus(`正在下载动画 · ${snapshot.fetched || 0}/5`);
+  } else if ((!previewError && !uploading) || active || snapshot.phase === "read") {
+    displayStatus(phases[snapshot.phase] || "", snapshot.phase.endsWith("error"));
+  }
+}
+
 async function refresh() {
-  if (sending) return;
+  if (sending || restoring) return;
   try {
     const response = await fetch("/api/status");
     if (!response.ok) return;
     const snapshot = await response.json();
-    if (sending) return;
-    active = busyPhases.has(snapshot.phase);
-    const playing = snapshot.phase === "playing";
-    gate.classList.toggle("is-playing", playing);
-    updateButton();
-    if (playing) {
-      const remaining = Math.max(0, Math.ceil(snapshot.deadline - Date.now() / 1000));
-      const warning = snapshot.lightError ? "灯光设置失败。" : "";
-      displayStatus(`${warning}显示中 · ${remaining} 秒后恢复`, snapshot.lightError);
-    } else if (snapshot.phase === "downloading") {
-      displayStatus(`正在下载动画 · ${snapshot.fetched || 0}/5`);
-    } else if ((!previewError && !uploading) || active) {
-      displayStatus(phases[snapshot.phase] || "", snapshot.phase.endsWith("error"));
-    }
+    if (!sending && !restoring) applyStatus(snapshot);
   } catch {
     if (!sending) displayStatus("暂时连不上服务", true);
   }
@@ -179,12 +195,26 @@ form.addEventListener("submit", async (event) => {
   updateButton();
   displayStatus("正在发送…");
   try {
-    await post("/api/send", payload());
-    active = true;
+    applyStatus(await post("/api/send", payload()));
   } catch (error) {
     displayStatus(error.message, true);
   } finally {
     sending = false;
+    updateButton();
+  }
+});
+
+markRead.addEventListener("click", async () => {
+  if (!canRestore || restoring) return;
+  restoring = true;
+  updateButton();
+  displayStatus("正在恢复原屏幕…");
+  try {
+    applyStatus(await post("/api/restore", {id: noticeId}));
+  } catch (error) {
+    displayStatus(error.message, true);
+  } finally {
+    restoring = false;
     updateButton();
   }
 });

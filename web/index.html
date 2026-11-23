@@ -18,7 +18,7 @@
           <div class="bezel"><div class="lcd lcd-2"></div></div>
           <div class="bezel"><div class="lcd lcd-3"></div></div>
           <div class="bezel"><div class="lcd lcd-4"></div></div>
-          <div class="bezel"><div class="lcd lcd-5"></div></div>
+          <div class="bezel"><div class="lcd lcd-5"><time id="sent-time" hidden></time></div></div>
         </div>
         <div class="base" aria-hidden="true"><i></i><i></i><i></i></div>
       </div>
@@ -40,7 +40,10 @@
         <span id="sticker-name"></span>
         <button type="button" id="remove-sticker" aria-label="移除表情包" title="移除表情包" hidden>×</button>
       </div>
-      <p class="status" aria-live="polite"></p>
+      <div class="feedback">
+        <p class="status" aria-live="polite"></p>
+        <button type="button" id="mark-read" hidden>标为已读</button>
+      </div>
     </form>
   </main>
 </body>

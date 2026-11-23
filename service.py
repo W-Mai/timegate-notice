@@ -10,16 +10,18 @@ import time
 import urllib.request
 from collections import OrderedDict
 from dataclasses import dataclass, field
+from datetime import datetime
 from http import HTTPStatus
 from http.cookies import SimpleCookie
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 from urllib.parse import urlsplit
+from zoneinfo import ZoneInfo
 
 from render import MAX_STICKER_BYTES, Renderer, StickerError, TextError, normalize_text, sticker_gif
 
 
-DISPLAY_SECONDS = 30
+DISPLAY_SECONDS = 30 * 60
 ASSET_TIMEOUT = 12
 RESTORE_RETRY_SECONDS = 5
 MAX_STORED_STICKERS = 12
@@ -29,6 +31,7 @@ HTTP = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 ASSET_PATH = re.compile(r"/asset/([a-f0-9]{32})/([0-4])\.gif")
 STATIC = {"/": ("index.html", "text/html"), "/style.css": ("style.css", "text/css"),
           "/app.js": ("app.js", "text/javascript")}
+NOTICE_TIME_ZONE = ZoneInfo("Asia/Shanghai")
 
 
 class DeviceError(RuntimeError):
@@ -88,7 +91,6 @@ class Notice:
     gifs: tuple
     key: str = field(default_factory=lambda: secrets.token_hex(16))
     fetched: set = field(default_factory=set)
-    ready: threading.Event = field(default_factory=threading.Event)
 
 
 class Notices:
@@ -96,13 +98,16 @@ class Notices:
         self.gate = gate
         self.assets_origin = assets_origin.rstrip("/")
         self.journal = journal
-        self.lock = threading.Lock()
+        self.lock = threading.Condition()
         self.active = None
+        self.pending = None
         self.state = {"phase": "idle"}
         if journal.exists():
-            pending = json.loads(journal.read_bytes())
-            self.state = {"phase": "recovering"}
-            threading.Thread(target=self.finish, args=(pending, "restored"), daemon=True).start()
+            self.pending = json.loads(journal.read_bytes())
+            self.state = {"phase": "recovering", "id": self.pending.get("id"),
+                          "sentTime": self.pending.get("sentTime"), "readRequested": self.pending.get("read", False),
+                          "deadline": self.pending["deadline"]}
+            threading.Thread(target=self.finish, args=("restored",), daemon=True).start()
 
     def persist(self, pending):
         self.journal.parent.mkdir(parents=True, exist_ok=True)
@@ -110,15 +115,37 @@ class Notices:
         temporary.write_text(json.dumps(pending))
         temporary.replace(self.journal)
 
-    def start(self, color, gifs):
+    def start(self, color, gifs, sent_time):
         notice = Notice(color, gifs)
         with self.lock:
-            if self.active is not None or self.journal.exists():
-                return False
+            if self.active is not None or self.pending is not None:
+                return None
             self.active = notice
-            self.state = {"phase": "preparing"}
+            self.state = {"phase": "preparing", "id": notice.key, "sentTime": sent_time}
+            snapshot = dict(self.state)
         threading.Thread(target=self.run, args=(notice,), daemon=True).start()
-        return True
+        return snapshot
+
+    def request_restore(self, key):
+        with self.lock:
+            if key is not None and key != self.state.get("id"):
+                return None
+            if self.state["phase"] == "read":
+                return dict(self.state)
+            if self.active is None and self.pending is None:
+                return None
+            if not self.state.get("readRequested"):
+                if self.pending is not None:
+                    pending = {**self.pending, "read": True, "deadline": time.time()}
+                    self.persist(pending)
+                    self.pending = pending
+                self.state.update(phase="restoring", readRequested=True)
+                self.lock.notify_all()
+            return dict(self.state)
+
+    def complete(self, outcome):
+        self.active = self.pending = None
+        self.state = {"phase": outcome, "id": self.state.get("id"), "sentTime": self.state.get("sentTime")}
 
     def status(self):
         with self.lock:
@@ -129,7 +156,7 @@ class Notices:
 
     def asset(self, key, index):
         with self.lock:
-            if self.active is not None and hmac.compare_digest(self.active.key, key):
+            if self.active is not None and not self.state.get("readRequested") and hmac.compare_digest(self.active.key, key):
                 return self.active.gifs[index]
         return None
 
@@ -138,17 +165,22 @@ class Notices:
             if self.active is not None and hmac.compare_digest(self.active.key, key):
                 self.active.fetched.add(index)
                 if len(self.active.fetched) == 5:
-                    self.active.ready.set()
+                    self.lock.notify_all()
 
     def run(self, notice):
         try:
-            pending = {"layout": self.gate.layout(), "deadline": time.time() + DISPLAY_SECONDS}
-            self.persist(pending)
+            layout = self.gate.layout()
+            with self.lock:
+                if self.state.get("readRequested"):
+                    self.complete("read")
+                    return
+                pending = {"layout": layout, "deadline": time.time(), "id": notice.key, "sentTime": self.state["sentTime"]}
+                self.persist(pending)
+                self.pending = pending
         except Exception:
             logging.exception("Could not save the current display layout")
             with self.lock:
-                self.active = None
-                self.state = {"phase": "layout-error"}
+                self.complete("read" if self.state.get("readRequested") else "layout-error")
             return
 
         outcome = "send-error"
@@ -156,51 +188,51 @@ class Notices:
             urls = [f"{self.assets_origin}/asset/{notice.key}/{index}.gif" for index in range(5)]
             self.gate.play(urls)
             with self.lock:
-                self.state = {"phase": "downloading"}
-            if not notice.ready.wait(ASSET_TIMEOUT):
-                raise DeviceError(f"{len(notice.fetched)} of 5 animations fetched")
-            pending["deadline"] = time.time() + DISPLAY_SECONDS
-            self.persist(pending)
-            outcome = "restored"
-            with self.lock:
-                self.state = {"phase": "playing", "deadline": pending["deadline"]}
-            logging.info("Device fetched all five GIFs")
-            try:
-                self.gate.breathe(notice.color)
-                logging.info("Device accepted ambient lighting")
-            except Exception:
-                logging.exception("Could not apply ambient lighting")
-                outcome = "light-error"
-                with self.lock:
-                    self.state["lightError"] = True
+                if not self.state.get("readRequested"):
+                    self.state["phase"] = "downloading"
+                if not self.lock.wait_for(lambda: self.state.get("readRequested") or len(notice.fetched) == 5, ASSET_TIMEOUT):
+                    raise DeviceError(f"{len(notice.fetched)} of 5 animations fetched")
+                if not self.state.get("readRequested"):
+                    pending = {**self.pending, "deadline": time.time() + DISPLAY_SECONDS}
+                    self.persist(pending)
+                    self.pending = pending
+                    self.state.update(phase="playing", deadline=pending["deadline"])
+                    outcome = "restored"
+            if outcome == "restored":
+                logging.info("Device fetched all five GIFs")
+                try:
+                    self.gate.breathe(notice.color)
+                    logging.info("Device accepted ambient lighting")
+                except Exception:
+                    logging.exception("Could not apply ambient lighting")
+                    outcome = "light-error"
+                    with self.lock:
+                        self.state["lightError"] = True
         except Exception:
-            logging.exception("Could not start five-screen playback")
-            pending["deadline"] = time.time()
-            try:
-                self.persist(pending)
-            except OSError:
-                logging.exception("Could not update the restore deadline")
-        self.finish(pending, outcome)
+            with self.lock:
+                if not self.state.get("readRequested"):
+                    logging.exception("Could not start five-screen playback")
+        self.finish(outcome)
 
-    def finish(self, pending, outcome):
-        time.sleep(max(0, pending["deadline"] - time.time()))
+    def finish(self, outcome):
         with self.lock:
-            self.state = {"phase": "restoring"}
+            self.lock.wait_for(lambda: self.state.get("readRequested"), max(0, self.pending["deadline"] - time.time()))
+            self.state["phase"] = "restoring"
+            layout = self.pending["layout"]
         while True:
             try:
-                self.gate.restore(pending["layout"])
-                self.journal.unlink(missing_ok=True)
+                self.gate.restore(layout)
+                with self.lock:
+                    self.journal.unlink(missing_ok=True)
+                    self.complete("read" if self.state.get("readRequested") else outcome)
             except Exception:
                 logging.exception("Display restore failed; retry scheduled")
                 with self.lock:
-                    self.state = {"phase": "restore-retry"}
+                    self.state["phase"] = "restore-retry"
                 time.sleep(RESTORE_RETRY_SECONDS)
                 continue
-            break
-        logging.info("Device accepted display restoration")
-        with self.lock:
-            self.active = None
-            self.state = {"phase": outcome}
+            logging.info("Device accepted display restoration")
+            return
 
 
 class Server(ThreadingHTTPServer):
@@ -294,7 +326,7 @@ class Handler(BaseHTTPRequestHandler):
             self.reply(404)
 
     def do_POST(self):
-        if self.path not in ("/api/preview", "/api/send", "/api/sticker"):
+        if self.path not in ("/api/preview", "/api/send", "/api/sticker", "/api/restore"):
             self.reply(404)
             return
         if not self.authenticated():
@@ -305,6 +337,9 @@ class Handler(BaseHTTPRequestHandler):
             return
         if self.path == "/api/sticker":
             self.upload_sticker()
+            return
+        if self.path == "/api/restore":
+            self.restore_notice()
             return
         try:
             length = int(self.headers.get("Content-Length", "0"))
@@ -340,10 +375,38 @@ class Handler(BaseHTTPRequestHandler):
             return
         if sticker is not None:
             gifs = gifs[:panel] + (sticker,) + gifs[panel + 1:]
-        if self.server.notices.start(color, gifs):
-            self.json_reply(HTTPStatus.ACCEPTED, {"phase": "preparing"})
+        sent_time = datetime.now(NOTICE_TIME_ZONE).strftime("%H:%M")
+        last = self.server.renderer.add_timestamp(gifs[-1], sent_time, with_sticker=panel == 4)
+        snapshot = self.server.notices.start(color, (*gifs[:-1], last), sent_time)
+        if snapshot is not None:
+            self.json_reply(HTTPStatus.ACCEPTED, snapshot)
         else:
             self.json_reply(HTTPStatus.CONFLICT, {"error": "上一条内容尚未结束"})
+
+    def restore_notice(self):
+        try:
+            length = int(self.headers.get("Content-Length", "0"))
+            if not 0 <= length <= 512:
+                raise ValueError
+            payload = json.loads(self.rfile.read(length)) if length else {}
+            if not isinstance(payload, dict):
+                raise ValueError
+            key = payload.get("id")
+            if key is not None and (not isinstance(key, str) or not re.fullmatch(r"[a-f0-9]{32}", key)):
+                raise ValueError
+        except (UnicodeError, ValueError):
+            self.json_reply(400, {"error": "通知编号格式无效"})
+            return
+        try:
+            snapshot = self.server.notices.request_restore(key)
+        except OSError:
+            logging.exception("Could not save restore request")
+            self.json_reply(503, {"error": "暂时无法保存恢复请求，请重试"})
+            return
+        if snapshot is None:
+            self.json_reply(HTTPStatus.CONFLICT, {"error": "这条通知已结束或当前没有通知"})
+        else:
+            self.json_reply(HTTPStatus.OK if snapshot["phase"] == "read" else HTTPStatus.ACCEPTED, snapshot)
 
     def upload_sticker(self):
         try:

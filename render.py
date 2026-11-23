@@ -8,6 +8,8 @@ from PIL import Image, ImageDraw, ImageFont, ImageOps, ImageSequence
 
 SIZE = 128
 PADDING = 5
+TIME_STRIP = 22
+TIME_TOP = SIZE - TIME_STRIP
 MAX_TEXT = 48
 MAX_STICKER_BYTES = 4 * 1024 * 1024
 MAX_STICKER_DURATION = 8000
@@ -133,8 +135,9 @@ class Renderer:
             tops = [min(box[1] for box in row) for row in bounds]
             heights = [max(box[3] for box in row) - top for row, top in zip(bounds, tops)]
             total = sum(heights) + PADDING * (count - 1)
-            if total <= SIZE - PADDING * 2:
-                return rows, bounds, tops, heights, total
+            height = TIME_TOP if max_panels == 5 and any(4 in PANELS[len(row)] for row in rows) else SIZE
+            if total <= height - PADDING * 2:
+                return rows, bounds, tops, heights, height, total
         return None
 
     def draw_text(self, tiles, text, with_sticker):
@@ -156,10 +159,10 @@ class Renderer:
                 high = size - 1
         if layout is None:
             raise TextError("文字排不进五块屏，请缩短")
-        size, (rows, bounds, tops, heights, total) = layout
+        size, (rows, bounds, tops, heights, height, total) = layout
         font = self.font(size)
         sticker_panels = PANELS[max(map(len, rows)) + 1] if with_sticker else None
-        y = (SIZE - total) // 2
+        y = (height - total) // 2
         for row, boxes, top, height in zip(rows, bounds, tops, heights):
             panels = sticker_panels[-len(row) - 1:-1] if sticker_panels else PANELS[len(row)]
             for screen, piece, (left, _, right, _) in zip(panels, row, boxes):
@@ -183,3 +186,23 @@ class Renderer:
         preview_bytes = io.BytesIO()
         preview.save(preview_bytes, "PNG", optimize=True)
         return preview_bytes.getvalue(), tuple(gifs), sticker_panel
+
+    def add_timestamp(self, gif, time_label, with_sticker):
+        font = self.font(18)
+        _, _, right, bottom = font.getbbox(time_label)
+        position = (SIZE - PADDING - right, SIZE - PADDING - bottom)
+        frames = []
+        durations = []
+        with Image.open(io.BytesIO(gif)) as source:
+            for frame in ImageSequence.Iterator(source):
+                tile = frame.convert("RGB")
+                if with_sticker:
+                    fitted = ImageOps.contain(tile, (SIZE, TIME_TOP))
+                    tile = Image.new("RGB", (SIZE, SIZE), BACKGROUND)
+                    tile.paste(fitted, ((SIZE - fitted.width) // 2, (TIME_TOP - fitted.height) // 2))
+                ImageDraw.Draw(tile).text(position, time_label, font=font, fill=FOREGROUND)
+                frames.append(tile.quantize(colors=128))
+                durations.append(frame.info.get("duration") or 100)
+        output = io.BytesIO()
+        frames[0].save(output, "GIF", save_all=True, append_images=frames[1:], duration=durations, loop=0)
+        return output.getvalue()
