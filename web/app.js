@@ -114,7 +114,7 @@ input.addEventListener("input", () => {
   updateButton();
   previewDelay = setTimeout(preview, 110);
 });
-color.addEventListener("input", () => gate.style.setProperty("--light", color.value));
+color.addEventListener("input", () => document.documentElement.style.setProperty("--light", color.value));
 chooseSticker.addEventListener("click", () => stickerFile.click());
 stickerFile.addEventListener("change", async () => {
   const file = stickerFile.files[0];
@@ -156,6 +156,7 @@ removeSticker.addEventListener("click", () => {
 });
 
 function applyStatus(snapshot) {
+  form.dataset.phase = snapshot.phase;
   active = busyPhases.has(snapshot.phase);
   noticeId = snapshot.id;
   canRestore = active && !snapshot.readRequested && !["restoring", "restore-retry"].includes(snapshot.phase);
