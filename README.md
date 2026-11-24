@@ -1,5 +1,7 @@
 # TimeGate Notice
 
+![时光之门五屏动画演示](docs/hero.svg)
+
 在 Divoom Times Gate II 的五块屏幕上播放文字和表情包的局域网服务。
 
 ## 功能
