@@ -78,6 +78,9 @@ class Gate:
         self.call("Channel/SetRGBInfo", OnOff=1, Brightness=100, Color=color, ColorCycle=0,
                   SelectLightIndex=0, LightList=[{"SelectEffect": effect} for effect in (4, 0, 0)])
 
+    def beep(self):
+        self.call("Device/PlayBuzzer", ActiveTimeInCycle=150, OffTimeInCycle=150, PlayTotalTime=600)
+
     def restore(self, layout):
         if "ClockId" in layout:
             self.call("Channel/Set5LcdWholeClockId", ClockId=layout["ClockId"])
@@ -89,6 +92,7 @@ class Gate:
 class Notice:
     color: str
     gifs: tuple
+    buzzer: bool = False
     key: str = field(default_factory=lambda: secrets.token_hex(16))
     fetched: set = field(default_factory=set)
 
@@ -117,8 +121,8 @@ class Notices:
         temporary.write_text(json.dumps(pending))
         temporary.replace(self.journal)
 
-    def start(self, color, gifs, sent_time):
-        notice = Notice(color, gifs)
+    def start(self, color, gifs, sent_time, *, buzzer=False):
+        notice = Notice(color, gifs, buzzer)
         with self.lock:
             if self.active is not None or self.pending is not None:
                 return None
@@ -210,6 +214,16 @@ class Notices:
                     outcome = "light-error"
                     with self.lock:
                         self.state["lightError"] = True
+                with self.lock:
+                    beep = notice.buzzer and not self.state.get("readRequested")
+                if beep:
+                    try:
+                        self.gate.beep()
+                        logging.info("Device accepted notification buzzer")
+                    except Exception:
+                        logging.exception("Could not play notification buzzer")
+                        with self.lock:
+                            self.state["buzzerError"] = True
         except Exception:
             with self.lock:
                 if not self.state.get("readRequested"):
@@ -367,6 +381,10 @@ class Handler(BaseHTTPRequestHandler):
             color = payload.get("color")
             if not isinstance(color, str) or not re.fullmatch(r"#[a-fA-F0-9]{6}", color):
                 raise ValueError
+            buzzer = payload.get("buzzer", False)
+            if type(buzzer) is not bool:
+                self.json_reply(400, {"error": "蜂鸣提示须为布尔值"})
+                return
             key = payload.get("sticker")
             sticker = None
             if key is not None:
@@ -392,7 +410,7 @@ class Handler(BaseHTTPRequestHandler):
             gifs = gifs[:panel] + (sticker,) + gifs[panel + 1:]
         sent_time = datetime.now(NOTICE_TIME_ZONE).strftime("%H:%M")
         last = self.server.renderer.add_timestamp(gifs[-1], sent_time, with_sticker=panel == 4)
-        snapshot = self.server.notices.start(color, (*gifs[:-1], last), sent_time)
+        snapshot = self.server.notices.start(color, (*gifs[:-1], last), sent_time, buzzer=buzzer)
         if snapshot is not None:
             self.json_reply(HTTPStatus.ACCEPTED, snapshot)
         else:

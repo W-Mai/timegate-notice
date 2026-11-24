@@ -33,4 +33,6 @@ systemctl --user enable --now timegate-notice.service
 | `POST /api/restore` | 空请求体恢复当前通知，也可用 JSON `{"id":"…"}` 指定通知 |
 | `GET /api/status` | 空请求体 |
 
+发送请求可以加 `"buzzer":true`。设备拉取五份 GIF 后响两声。省略字段时默认为 `false`。
+
 发送返回 `202` 和通知 `id`。手动恢复完成后，状态的 `phase` 为 `read`。自然到期恢复后，状态为 `restored`。

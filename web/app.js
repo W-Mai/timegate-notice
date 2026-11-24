@@ -1,6 +1,7 @@
 const form = document.querySelector("form");
 const input = document.querySelector("#message");
 const color = document.querySelector("#color");
+const buzzer = document.querySelector("#buzzer");
 const button = form.querySelector('button[type="submit"]');
 const status = document.querySelector(".status");
 const gate = document.querySelector(".gate");
@@ -168,8 +169,8 @@ function applyStatus(snapshot) {
   if (playing) {
     const remaining = Math.max(0, Math.ceil(snapshot.deadline - Date.now() / 1000));
     const duration = `${Math.floor(remaining / 60)}:${String(remaining % 60).padStart(2, "0")}`;
-    const warning = snapshot.lightError ? "灯光设置失败。" : "";
-    displayStatus(`${warning}显示中 · ${duration} 后恢复`, snapshot.lightError);
+    const warning = `${snapshot.lightError ? "灯光设置失败。" : ""}${snapshot.buzzerError ? "蜂鸣提示失败。" : ""}`;
+    displayStatus(`${warning}显示中 · ${duration} 后恢复`, Boolean(warning));
   } else if (snapshot.phase === "downloading") {
     displayStatus(`正在下载动画 · ${snapshot.fetched || 0}/5`);
   } else if ((!previewError && !uploading) || active || snapshot.phase === "read") {
@@ -196,7 +197,7 @@ form.addEventListener("submit", async (event) => {
   updateButton();
   displayStatus("正在发送…");
   try {
-    applyStatus(await post("/api/send", payload()));
+    applyStatus(await post("/api/send", {...payload(), buzzer: buzzer.checked}));
   } catch (error) {
     displayStatus(error.message, true);
   } finally {
